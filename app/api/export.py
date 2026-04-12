@@ -164,5 +164,5 @@ async def download_bpmn(project_id: str):
     return Response(
         content=file_bytes,
         media_type="application/xml",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"},
     )
