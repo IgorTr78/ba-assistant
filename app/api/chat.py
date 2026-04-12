@@ -1,6 +1,6 @@
 import uuid
-from fastapi import APIRouter, HTTPException, Depends
-from fastapi.responses import StreamingResponse
+import httpx
+from fastapi import APIRouter, HTTPException
 
 from app.models.schemas import ChatRequest, ChatResponse, AgentName
 from app.agents.orchestrator import run_orchestrator
@@ -38,7 +38,6 @@ def _save_message(session_id: str, role: str, content: str, agent: str | None = 
         "role": role,
         "content": content,
         "agent": agent,
-        "timestamp": str(uuid.uuid4()),  # используем uuid как уникальный timestamp
     })
     sb.table("sessions").update({"messages": messages}).eq("id", str(session_id)).execute()
 
@@ -52,12 +51,29 @@ def _format_requirements(requirements: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _extract_url_from_message(message: str) -> str | None:
+    """Извлекает первый URL из сообщения."""
+    import re
+    urls = re.findall(r'https?://[^\s]+', message)
+    return urls[0] if urls else None
+
+
+async def _download_pdf_from_url(url: str) -> bytes | None:
+    """Скачивает PDF по URL."""
+    try:
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+            response = await client.get(url, headers={
+                "User-Agent": "Mozilla/5.0 (compatible; BA-Assistant/1.0)"
+            })
+            if response.status_code == 200:
+                return response.content
+    except Exception as e:
+        print(f"URL download error: {e}")
+    return None
+
+
 @router.post("/message", response_model=ChatResponse)
 async def send_message(req: ChatRequest):
-    """
-    Основной эндпоинт чата.
-    Принимает сообщение, роутит по агентам, возвращает ответ.
-    """
     # 1. Загружаем проект
     project = _get_project(str(req.project_id))
 
@@ -97,7 +113,7 @@ async def send_message(req: ChatRequest):
             content=routing.clarification_question,
         )
 
-    # 5. Запускаем нужных агентов
+    # 5. Запускаем агентов
     agent = routing.priority_agent
     content = ""
     bpmn_xml = None
@@ -109,10 +125,7 @@ async def send_message(req: ChatRequest):
         for rec in image_records:
             try:
                 sb = get_supabase()
-                # Скачиваем из Supabase Storage
-                file_bytes = sb.storage.from_("project-files").download(
-                    rec["storage_path"]
-                )
+                file_bytes = sb.storage.from_("project-files").download(rec["storage_path"])
                 media_type = "image/jpeg" if rec["filename"].lower().endswith(('jpg','jpeg')) else "image/png"
                 images_data.append({
                     "base64": encode_image_to_base64(file_bytes),
@@ -132,14 +145,60 @@ async def send_message(req: ChatRequest):
             content = "Не удалось загрузить изображения для анализа."
 
     # ── Анализ документов ──
-    elif agent == AgentName.document_analyst and file_records:
-        rec = file_records[0]
-        content = await run_document_analyst(
-            extracted_text=rec.get("extracted_text", ""),
-            filename=rec["filename"],
-            file_type=rec["file_type"],
-            project_name=project["name"],
-        )
+    elif agent == AgentName.document_analyst:
+        if file_records:
+            # Есть загруженный файл
+            rec = file_records[0]
+            content = await run_document_analyst(
+                extracted_text=rec.get("extracted_text", ""),
+                filename=rec["filename"],
+                file_type=rec["file_type"],
+                project_name=project["name"],
+            )
+        else:
+            # Нет файла — проверяем URL в сообщении
+            url = _extract_url_from_message(req.message)
+            if url and url.lower().endswith('.pdf'):
+                # Скачиваем PDF по URL
+                pdf_bytes = await _download_pdf_from_url(url)
+                if pdf_bytes:
+                    from app.services.file_processor import extract_text_from_pdf, truncate_text
+                    extracted = extract_text_from_pdf(pdf_bytes)
+                    extracted = truncate_text(extracted)
+                    content = await run_document_analyst(
+                        extracted_text=extracted,
+                        filename=url.split('/')[-1] or "document.pdf",
+                        file_type="pdf",
+                        project_name=project["name"],
+                    )
+                    content = f"📄 Документ загружен по ссылке: {url}\n\n" + content
+                else:
+                    content = (
+                        f"Не удалось скачать PDF по ссылке: {url}\n\n"
+                        "Пожалуйста, скачайте файл на компьютер и загрузите через кнопку 📎 в чате."
+                    )
+            elif url:
+                # Ссылка есть, но не PDF — анализируем как требование
+                content = await run_requirements_agent(
+                    message=req.message,
+                    project_name=project["name"],
+                    session_summary=project.get("description", ""),
+                    chat_history=_get_session_messages(str(req.session_id))[-10:],
+                    existing_requirements=_format_requirements(
+                        storage_service.get_project_requirements(str(req.project_id))
+                    ),
+                )
+            else:
+                # Нет ни файла ни URL — передаём в агент требований
+                content = await run_requirements_agent(
+                    message=req.message,
+                    project_name=project["name"],
+                    session_summary=project.get("description", ""),
+                    chat_history=_get_session_messages(str(req.session_id))[-10:],
+                    existing_requirements=_format_requirements(
+                        storage_service.get_project_requirements(str(req.project_id))
+                    ),
+                )
 
     # ── Требования ──
     elif agent == AgentName.requirements:
@@ -165,13 +224,12 @@ async def send_message(req: ChatRequest):
         bpmn_xml = result.get("xml", "")
         content = result.get("description", "")
 
-        # Сохраняем схему
         if bpmn_xml:
             version = (existing_bpmn.get("version", 0) + 1) if existing_bpmn else 1
             storage_service.save_bpmn(
                 project_id=str(req.project_id),
                 xml_content=bpmn_xml,
-                edited_by=str(req.session_id),  # заменить на user_id когда будет auth
+                edited_by=str(req.session_id),
                 version=version,
             )
             artifacts.append({"type": "bpmn", "version": version})
@@ -193,8 +251,17 @@ async def send_message(req: ChatRequest):
             project_name=project["name"],
         )
 
+    # ── Фолбэк — всё остальное через агент требований ──
     else:
-        content = f"Агент '{agent}' получил запрос, но пока не реализован полностью."
+        history = _get_session_messages(str(req.session_id))
+        existing = storage_service.get_project_requirements(str(req.project_id))
+        content = await run_requirements_agent(
+            message=req.message,
+            project_name=project["name"],
+            session_summary=project.get("description", ""),
+            chat_history=history[-10:],
+            existing_requirements=_format_requirements(existing),
+        )
 
     # 6. Сохраняем ответ
     _save_message(str(req.session_id), "assistant", content, agent.value)
@@ -211,6 +278,5 @@ async def send_message(req: ChatRequest):
 
 @router.get("/history/{session_id}")
 async def get_history(session_id: str):
-    """Возвращает историю сообщений сессии."""
     messages = _get_session_messages(session_id)
     return {"session_id": session_id, "messages": messages}
