@@ -677,6 +677,10 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); color: var(-
   <!-- ── CHAT ── -->
   <div class="view active" id="view-chat" style="flex-direction:column">
     <div class="topbar">
+      <!-- Mobile menu button -->
+      <button class="mobile-menu-btn tbtn" onclick="toggleMobileSidebar()" style="padding:6px 8px;margin-right:4px">
+        <svg width="18" height="18" fill="none" viewBox="0 0 18 18"><path d="M2 4h14M2 9h14M2 14h14" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+      </button>
       <div style="flex:1;min-width:0">
         <div class="topbar-title" id="proj-title">Онбординг клиентов</div>
         <span class="topbar-sub" id="proj-sub">Сессия #3 · Формализация требований</span>
@@ -922,6 +926,33 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); color: var(-
   </div>
 </aside>
 </div>
+
+<!-- Mobile sidebar overlay -->
+<div class="sidebar-overlay" id="sidebar-overlay" onclick="toggleMobileSidebar()"></div>
+
+<!-- Mobile bottom navigation -->
+<nav class="mobile-nav" id="mobile-nav">
+  <button class="mobile-nav-btn active" id="mnav-chat" onclick="mobileNav('chat')">
+    <svg fill="none" viewBox="0 0 22 22"><path d="M2 4A1.5 1.5 0 0 1 3.5 2.5h15A1.5 1.5 0 0 1 20 4v10a1.5 1.5 0 0 1-1.5 1.5H8L3 19.5V4Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>
+    <span>Чат</span>
+  </button>
+  <button class="mobile-nav-btn" id="mnav-req" onclick="mobileNav('requirements')">
+    <svg fill="none" viewBox="0 0 22 22"><path d="M5 5h12M5 9h8M5 13h6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+    <span>Требования</span>
+  </button>
+  <button class="mobile-nav-btn" id="mnav-bpmn" onclick="mobileNavBpmn()">
+    <svg fill="none" viewBox="0 0 22 22"><rect x="2" y="6" width="6" height="5" rx="1.5" stroke="currentColor" stroke-width="1.6"/><rect x="14" y="6" width="6" height="5" rx="1.5" stroke="currentColor" stroke-width="1.6"/><path d="M8 8.5h6M17 11v3.5H5V11" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    <span>Схема</span>
+  </button>
+  <button class="mobile-nav-btn" id="mnav-proj" onclick="toggleMobileSidebar()">
+    <svg fill="none" viewBox="0 0 22 22"><rect x="2" y="3" width="18" height="16" rx="2" stroke="currentColor" stroke-width="1.6"/><path d="M6 8h10M6 12h7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+    <span>Проекты</span>
+  </button>
+  <button class="mobile-nav-btn" id="mnav-export" onclick="openModal('modal-export')">
+    <svg fill="none" viewBox="0 0 22 22"><path d="M11 3v12M7 11l4 4 4-4M3 18h16" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    <span>Экспорт</span>
+  </button>
+</nav>
 
 <!-- ════ MODAL: Новый проект ════ -->
 <div class="overlay" id="modal-proj" onclick="overlayClick(event, 'modal-proj')">
@@ -1620,6 +1651,105 @@ initApp().then(() => {
   setTimeout(initBpmnJs, 800);
 });
 setupResize();
+setupMobile();
+
+// ── Mobile functions ──
+function isMobile() {
+  return window.innerWidth <= 768;
+}
+
+function setupMobile() {
+  // Detect mobile and adjust
+  if(!isMobile()) return;
+
+  // Panel is hidden by default on mobile (shown as bottom sheet)
+  document.getElementById('app').classList.add('panel-hidden');
+
+  // Re-open sidebar when switching projects
+  console.log('Mobile mode active');
+}
+
+function toggleMobileSidebar() {
+  if(!isMobile()) return;
+  const sidebar = document.querySelector('.sidebar');
+  const overlay = document.getElementById('sidebar-overlay');
+  const isOpen = sidebar.classList.contains('mobile-open');
+  sidebar.classList.toggle('mobile-open', !isOpen);
+  overlay.classList.toggle('active', !isOpen);
+  // Update nav button
+  const btn = document.getElementById('mnav-proj');
+  if(btn) btn.classList.toggle('active', !isOpen);
+}
+
+function mobileNav(view) {
+  // Switch view
+  switchView(view, document.querySelector('.nav-item'));
+
+  // Update bottom nav active state
+  ['chat','req','bpmn','proj','export'].forEach(id => {
+    const b = document.getElementById('mnav-'+id);
+    if(b) b.classList.remove('active');
+  });
+  const activeBtn = document.getElementById('mnav-'+view.replace('requirements','req'));
+  if(activeBtn) activeBtn.classList.add('active');
+
+  // Close sidebar if open
+  const sidebar = document.querySelector('.sidebar');
+  if(sidebar.classList.contains('mobile-open')) toggleMobileSidebar();
+}
+
+function mobileNavBpmn() {
+  const panel = document.getElementById('bpmn-panel');
+  const btn = document.getElementById('mnav-bpmn');
+  if(!panel) return;
+
+  if(isMobile()) {
+    const isOpen = panel.classList.contains('mobile-open');
+    panel.classList.toggle('mobile-open', !isOpen);
+    document.getElementById('app').classList.toggle('panel-hidden', isOpen);
+    if(btn) btn.classList.toggle('active', !isOpen);
+    // Load bpmn if opening
+    if(!isOpen && currentProjectId && !window._lastBpmnXml) {
+      loadBpmnFromApi();
+    }
+  } else {
+    togglePanel();
+  }
+}
+
+// Override togglePanel for mobile
+const _origTogglePanel = togglePanel;
+function togglePanel() {
+  if(isMobile()) {
+    mobileNavBpmn();
+  } else {
+    _origTogglePanel();
+  }
+}
+
+// Auto-close sidebar on project select (mobile)
+const _origSelectProject = selectProjectById;
+async function selectProjectById(projectId, name, el) {
+  await _origSelectProject(projectId, name, el);
+  if(isMobile()) {
+    const sidebar = document.querySelector('.sidebar');
+    if(sidebar.classList.contains('mobile-open')) {
+      toggleMobileSidebar();
+    }
+  }
+}
+
+// Handle resize - switch between mobile and desktop
+window.addEventListener('resize', () => {
+  const mobile = isMobile();
+  document.querySelector('.sidebar').classList.toggle('mobile-open', false);
+  document.getElementById('sidebar-overlay').classList.toggle('active', false);
+  if(!mobile) {
+    // Restore desktop state
+    const panel = document.getElementById('bpmn-panel');
+    if(panel) panel.classList.remove('mobile-open');
+  }
+});
 
 // ── Resize panels ──
 function setupResize() {
@@ -1782,6 +1912,169 @@ const BPMN_EDITOR_HTML = `<!DOCTYPE html>
 html,body { height:100%; overflow:hidden; font-family:sans-serif; }
 #canvas { height:100%; }
 .djs-palette { border-radius:8px!important; box-shadow:0 2px 8px rgba(0,0,0,0.12)!important; }
+
+/* ══════════════════════════════════
+   MOBILE RESPONSIVE (≤768px)
+══════════════════════════════════ */
+@media (max-width: 768px) {
+
+  /* Hide resize handles on mobile */
+  .resize-handle { display: none !important; }
+
+  /* Full-screen app, no flex columns */
+  .app {
+    flex-direction: column;
+    height: 100dvh; /* dynamic viewport height for mobile */
+    overflow: hidden;
+  }
+
+  /* Sidebar becomes hidden by default on mobile */
+  .sidebar {
+    position: fixed;
+    top: 0; left: 0; bottom: 0;
+    width: 280px !important;
+    z-index: 50;
+    transform: translateX(-100%);
+    transition: transform 0.25s ease;
+    box-shadow: var(--shadow-lg);
+  }
+  .sidebar.mobile-open {
+    transform: translateX(0);
+  }
+
+  /* Sidebar overlay */
+  .sidebar-overlay {
+    display: none;
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.4);
+    z-index: 49;
+  }
+  .sidebar-overlay.active { display: block; }
+
+  /* Main takes full screen */
+  .main {
+    width: 100% !important;
+    flex: 1;
+    min-width: 0 !important;
+    max-width: none !important;
+    padding-bottom: 60px; /* space for bottom nav */
+  }
+
+  /* BPMN panel — bottom sheet on mobile */
+  .bpmn-panel {
+    position: fixed;
+    bottom: 60px; left: 0; right: 0;
+    height: 70vh;
+    width: 100% !important;
+    min-width: 0 !important;
+    border-left: none;
+    border-top: 1.5px solid var(--border);
+    border-radius: 20px 20px 0 0;
+    transform: translateY(100%);
+    transition: transform 0.3s ease;
+    z-index: 40;
+    box-shadow: 0 -4px 24px rgba(0,0,0,0.12);
+  }
+  .bpmn-panel.mobile-open {
+    transform: translateY(0);
+  }
+  .app.panel-hidden .bpmn-panel {
+    display: flex !important; /* always in DOM, just hidden via transform */
+    transform: translateY(100%);
+  }
+
+  /* BPMN panel drag handle */
+  .bp-head::before {
+    content: '';
+    display: block;
+    position: absolute;
+    top: 8px; left: 50%;
+    transform: translateX(-50%);
+    width: 36px; height: 4px;
+    background: var(--border2);
+    border-radius: 2px;
+  }
+  .bp-head { position: relative; }
+
+  /* Bottom navigation bar */
+  .mobile-nav {
+    position: fixed;
+    bottom: 0; left: 0; right: 0;
+    height: 60px;
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-around;
+    z-index: 45;
+    padding: 0 8px;
+    box-shadow: 0 -2px 12px rgba(0,0,0,0.08);
+  }
+  .mobile-nav-btn {
+    display: flex; flex-direction: column; align-items: center; gap: 3px;
+    padding: 6px 12px; border-radius: 10px;
+    border: none; background: none; cursor: pointer;
+    font-family: var(--font); font-size: 10px; font-weight: 600;
+    color: var(--text3); transition: all 0.15s; min-width: 56px;
+  }
+  .mobile-nav-btn svg { width: 22px; height: 22px; }
+  .mobile-nav-btn.active { color: var(--blue); background: var(--blue-light); }
+  .mobile-nav-btn span { font-size: 10px; }
+
+  /* Topbar on mobile */
+  .topbar {
+    padding: 0 12px;
+    height: 52px;
+  }
+  .topbar .tbtn:not(.primary) { display: none; } /* hide non-essential buttons */
+  .topbar-title { font-size: 14px; }
+  .topbar-sub { font-size: 10px; }
+
+  /* Chat area padding */
+  .chat-wrap { padding: 12px 14px 8px; gap: 12px; }
+
+  /* Bubbles narrower on mobile */
+  .bubble { font-size: 13px; padding: 10px 12px; }
+
+  /* Input zone */
+  .input-zone { padding: 8px 10px 10px; }
+  .hints { gap: 4px; padding: 0 10px 8px; }
+  .hint { font-size: 11px; padding: 4px 10px; }
+
+  /* Views */
+  .view-head { padding: 0 14px; height: 50px; }
+  .req-scroll { padding: 12px 14px; }
+
+  /* Project list in sidebar */
+  .projects-list { max-height: calc(100vh - 320px); }
+
+  /* Modal full screen on mobile */
+  .modal { width: 100%; max-width: 100%; border-radius: 20px 20px 0 0; padding: 24px 20px; position: fixed; bottom: 0; left: 0; right: 0; margin: 0; }
+  .overlay { align-items: flex-end; }
+
+  /* Art card in chat */
+  .art-card { margin-top: 8px; }
+  .art-foot { flex-wrap: wrap; gap: 6px; }
+
+  /* Hide sidebar footer role on mobile */
+  .user-role { display: none; }
+
+  /* Menu button visible on mobile */
+  .mobile-menu-btn { display: flex !important; }
+}
+
+/* Desktop: hide mobile-only elements */
+.mobile-nav { display: none; }
+.mobile-menu-btn { display: none; }
+.sidebar-overlay { display: none; }
+
+/* Smooth scrolling for mobile */
+@media (max-width: 768px) {
+  .chat-wrap, .req-scroll, .ent-scroll, .projects-list {
+    -webkit-overflow-scrolling: touch;
+  }
+}
+
 </style>
 <script src="https://cdn.jsdelivr.net/npm/bpmn-js@17/dist/bpmn-modeler.production.min.js"></sc` + `ript>
 </head>
