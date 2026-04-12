@@ -1,4 +1,5 @@
 import uuid
+import asyncio
 import httpx
 from fastapi import APIRouter, HTTPException
 
@@ -10,6 +11,12 @@ from app.agents.bpmn_agent import run_bpmn_agent
 from app.agents.competitor_agent import run_competitor_analyst
 from app.agents.entity_agent import run_entity_agent
 from app.services import storage_service
+from app.services.memory_service import (
+    build_project_context,
+    get_or_create_summary,
+    update_project_memory,
+    format_history_for_prompt,
+)
 from app.core.database import get_supabase
 
 router = APIRouter()
@@ -45,47 +52,39 @@ def _save_message(session_id: str, role: str, content: str, agent: str | None = 
 def _format_requirements(requirements: list[dict]) -> str:
     if not requirements:
         return ""
-    lines = []
-    for r in requirements:
-        lines.append(f"{r.get('code', '')}: {r.get('content', '')}")
-    return "\n".join(lines)
+    return "\n".join(f"{r.get('code','')}: {r.get('content','')}" for r in requirements)
 
 
-def _extract_url_from_message(message: str) -> str | None:
-    """Извлекает первый URL из сообщения."""
+def _extract_url(message: str) -> str | None:
     import re
     urls = re.findall(r'https?://[^\s]+', message)
     return urls[0] if urls else None
 
 
-async def _download_pdf_from_url(url: str) -> bytes | None:
-    """Скачивает PDF по URL."""
+async def _download_pdf(url: str) -> bytes | None:
     try:
         async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-            response = await client.get(url, headers={
-                "User-Agent": "Mozilla/5.0 (compatible; BA-Assistant/1.0)"
-            })
-            if response.status_code == 200:
-                return response.content
+            r = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
+            if r.status_code == 200:
+                return r.content
     except Exception as e:
-        print(f"URL download error: {e}")
+        print(f"PDF download error: {e}")
     return None
 
 
 @router.post("/message", response_model=ChatResponse)
 async def send_message(req: ChatRequest):
+
     # 1. Загружаем проект
     project = _get_project(str(req.project_id))
 
-    # 2. Проверяем файлы и изображения
+    # 2. Файлы и изображения
     file_records = []
     image_records = []
-
     for fid in req.file_ids:
         rec = storage_service.get_file_record(str(fid))
         if rec:
             file_records.append(rec)
-
     for iid in req.image_ids:
         rec = storage_service.get_file_record(str(iid))
         if rec and rec.get("file_type") == "image":
@@ -94,13 +93,26 @@ async def send_message(req: ChatRequest):
     # 3. Сохраняем сообщение пользователя
     _save_message(str(req.session_id), "user", req.message)
 
-    # 4. Оркестратор
+    # 4. Загружаем историю и память
+    all_messages = _get_session_messages(str(req.session_id))
+
+    # Проектный контекст (требования + решения + глоссарий)
+    project_context = build_project_context(
+        project_id=str(req.project_id),
+        project_name=project["name"],
+        project_description=project.get("description", ""),
+    )
+
+    # Саммари сессии (автоматически обновляется)
+    session_summary = await get_or_create_summary(str(req.session_id), all_messages)
+
+    # 5. Оркестратор
     routing = await run_orchestrator(
         message=req.message,
         project_name=project["name"],
         project_description=project.get("description", ""),
-        has_files=len(file_records) > 0,
-        has_images=len(image_records) > 0,
+        has_files=bool(file_records),
+        has_images=bool(image_records),
     )
 
     if routing.needs_clarification:
@@ -113,13 +125,13 @@ async def send_message(req: ChatRequest):
             content=routing.clarification_question,
         )
 
-    # 5. Запускаем агентов
+    # 6. Запускаем агента
     agent = routing.priority_agent
     content = ""
     bpmn_xml = None
     artifacts = []
 
-    # ── Анализ изображений ──
+    # ── Изображения ──
     if agent == AgentName.image_analyst and image_records:
         images_data = []
         for rec in image_records:
@@ -133,21 +145,19 @@ async def send_message(req: ChatRequest):
                     "filename": rec["filename"],
                 })
             except Exception as e:
-                print(f"Image download error: {e}")
-
+                print(f"Image load error: {e}")
         if images_data:
             content = await run_image_analyst(
                 images=images_data,
                 project_name=project["name"],
-                additional_context=req.message,
+                additional_context=req.message + "\n\nКОНТЕКСТ ПРОЕКТА:\n" + project_context,
             )
         else:
-            content = "Не удалось загрузить изображения для анализа."
+            content = "Не удалось загрузить изображения."
 
     # ── Анализ документов ──
     elif agent == AgentName.document_analyst:
         if file_records:
-            # Есть загруженный файл
             rec = file_records[0]
             content = await run_document_analyst(
                 extracted_text=rec.get("extracted_text", ""),
@@ -156,60 +166,42 @@ async def send_message(req: ChatRequest):
                 project_name=project["name"],
             )
         else:
-            # Нет файла — проверяем URL в сообщении
-            url = _extract_url_from_message(req.message)
-            if url and url.lower().endswith('.pdf'):
-                # Скачиваем PDF по URL
-                pdf_bytes = await _download_pdf_from_url(url)
+            url = _extract_url(req.message)
+            if url and url.lower().split('?')[0].endswith('.pdf'):
+                pdf_bytes = await _download_pdf(url)
                 if pdf_bytes:
                     from app.services.file_processor import extract_text_from_pdf, truncate_text
-                    extracted = extract_text_from_pdf(pdf_bytes)
-                    extracted = truncate_text(extracted)
+                    extracted = truncate_text(extract_text_from_pdf(pdf_bytes))
                     content = await run_document_analyst(
                         extracted_text=extracted,
-                        filename=url.split('/')[-1] or "document.pdf",
+                        filename=url.split('/')[-1].split('?')[0] or "document.pdf",
                         file_type="pdf",
                         project_name=project["name"],
                     )
-                    content = f"📄 Документ загружен по ссылке: {url}\n\n" + content
+                    content = f"📄 Документ загружен по ссылке\n\n" + content
                 else:
                     content = (
-                        f"Не удалось скачать PDF по ссылке: {url}\n\n"
-                        "Пожалуйста, скачайте файл на компьютер и загрузите через кнопку 📎 в чате."
+                        f"Не удалось скачать PDF: {url}\n\n"
+                        "Скачайте файл и загрузите через кнопку 📎 в чате."
                     )
-            elif url:
-                # Ссылка есть, но не PDF — анализируем как требование
-                content = await run_requirements_agent(
-                    message=req.message,
-                    project_name=project["name"],
-                    session_summary=project.get("description", ""),
-                    chat_history=_get_session_messages(str(req.session_id))[-10:],
-                    existing_requirements=_format_requirements(
-                        storage_service.get_project_requirements(str(req.project_id))
-                    ),
-                )
             else:
-                # Нет ни файла ни URL — передаём в агент требований
+                # Нет файла — передаём в агент требований с полным контекстом
                 content = await run_requirements_agent(
                     message=req.message,
                     project_name=project["name"],
-                    session_summary=project.get("description", ""),
-                    chat_history=_get_session_messages(str(req.session_id))[-10:],
-                    existing_requirements=_format_requirements(
-                        storage_service.get_project_requirements(str(req.project_id))
-                    ),
+                    session_summary=session_summary,
+                    chat_history=all_messages,
+                    project_context=project_context,
                 )
 
     # ── Требования ──
     elif agent == AgentName.requirements:
-        history = _get_session_messages(str(req.session_id))
-        existing = storage_service.get_project_requirements(str(req.project_id))
         content = await run_requirements_agent(
             message=req.message,
             project_name=project["name"],
-            session_summary=project.get("description", ""),
-            chat_history=history[-10:],
-            existing_requirements=_format_requirements(existing),
+            session_summary=session_summary,
+            chat_history=all_messages,
+            project_context=project_context,
         )
 
     # ── BPMN ──
@@ -223,7 +215,6 @@ async def send_message(req: ChatRequest):
         )
         bpmn_xml = result.get("xml", "")
         content = result.get("description", "")
-
         if bpmn_xml:
             version = (existing_bpmn.get("version", 0) + 1) if existing_bpmn else 1
             storage_service.save_bpmn(
@@ -245,26 +236,31 @@ async def send_message(req: ChatRequest):
     # ── Сущности ──
     elif agent == AgentName.entity:
         reqs = storage_service.get_project_requirements(str(req.project_id))
-        context = _format_requirements(reqs) or req.message
         content = await run_entity_agent(
-            context=context,
+            context=_format_requirements(reqs) or req.message,
             project_name=project["name"],
         )
 
-    # ── Фолбэк — всё остальное через агент требований ──
+    # ── Фолбэк ──
     else:
-        history = _get_session_messages(str(req.session_id))
-        existing = storage_service.get_project_requirements(str(req.project_id))
         content = await run_requirements_agent(
             message=req.message,
             project_name=project["name"],
-            session_summary=project.get("description", ""),
-            chat_history=history[-10:],
-            existing_requirements=_format_requirements(existing),
+            session_summary=session_summary,
+            chat_history=all_messages,
+            project_context=project_context,
         )
 
-    # 6. Сохраняем ответ
+    # 7. Сохраняем ответ
     _save_message(str(req.session_id), "assistant", content, agent.value)
+
+    # 8. Обновляем проектную память асинхронно (не блокируем ответ)
+    updated_messages = _get_session_messages(str(req.session_id))
+    asyncio.create_task(update_project_memory(
+        project_id=str(req.project_id),
+        project_name=project["name"],
+        recent_messages=updated_messages[-20:],
+    ))
 
     return ChatResponse(
         session_id=req.session_id,
