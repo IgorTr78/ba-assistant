@@ -685,7 +685,7 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); color: var(-
         <div class="topbar-title" id="proj-title">Онбординг клиентов</div>
         <span class="topbar-sub" id="proj-sub">Сессия #3 · Формализация требований</span>
       </div>
-      <button class="tbtn" onclick="togglePanel()">
+      <button class="tbtn" onclick="isMobile() ? mobileNavBpmn() : togglePanel()">
         <svg fill="none" viewBox="0 0 15 15"><rect x="1" y="2" width="5" height="11" rx="1.5" stroke="currentColor" stroke-width="1.4"/><rect x="9" y="2" width="5" height="11" rx="1.5" stroke="currentColor" stroke-width="1.4"/></svg>
         <span id="panel-lbl">Схема BPMN</span>
       </button>
@@ -1227,7 +1227,6 @@ async function selectProjectById(projectId, name, el) {
     if(sessions.length > 0){
       currentSessionId = sessions[0].id;
       document.getElementById('proj-sub').textContent = sessions[0].title;
-      // Load chat history
       try {
         const hist = await apiGet('/api/chat/history/'+sessions[0].id);
         if(hist.messages && hist.messages.length > 0) {
@@ -1243,9 +1242,16 @@ async function selectProjectById(projectId, name, el) {
       await createNewSession();
     }
     loadRequirements(projectId);
-    // Load BPMN if viewer ready
     if(_bpmnInstance) await loadBpmnFromApi();
   } catch(e){ console.warn('selectProject error:', e); }
+
+  // Close mobile sidebar after project selection
+  if(isMobile()) {
+    const sidebar = document.querySelector('.sidebar');
+    if(sidebar && sidebar.classList.contains('mobile-open')) {
+      toggleMobileSidebar();
+    }
+  }
 }
 async function createNewSession() {
   if(!currentProjectId) return;
@@ -1703,41 +1709,18 @@ function mobileNavBpmn() {
   const btn = document.getElementById('mnav-bpmn');
   if(!panel) return;
 
-  if(isMobile()) {
-    const isOpen = panel.classList.contains('mobile-open');
-    panel.classList.toggle('mobile-open', !isOpen);
-    document.getElementById('app').classList.toggle('panel-hidden', isOpen);
-    if(btn) btn.classList.toggle('active', !isOpen);
-    // Load bpmn if opening
-    if(!isOpen && currentProjectId && !window._lastBpmnXml) {
-      loadBpmnFromApi();
-    }
-  } else {
-    togglePanel();
+  const isOpen = panel.classList.contains('mobile-open');
+  panel.classList.toggle('mobile-open', !isOpen);
+  document.getElementById('app').classList.toggle('panel-hidden', isOpen);
+  if(btn) btn.classList.toggle('active', !isOpen);
+  if(!isOpen && currentProjectId && !window._lastBpmnXml) {
+    loadBpmnFromApi();
   }
 }
 
-// Override togglePanel for mobile
-const _origTogglePanel = togglePanel;
-function togglePanel() {
-  if(isMobile()) {
-    mobileNavBpmn();
-  } else {
-    _origTogglePanel();
-  }
-}
+// togglePanel is handled by checking isMobile() inside mobileNavBpmn
 
-// Auto-close sidebar on project select (mobile)
-const _origSelectProject = selectProjectById;
-async function selectProjectById(projectId, name, el) {
-  await _origSelectProject(projectId, name, el);
-  if(isMobile()) {
-    const sidebar = document.querySelector('.sidebar');
-    if(sidebar.classList.contains('mobile-open')) {
-      toggleMobileSidebar();
-    }
-  }
-}
+// Auto-close sidebar on project select is handled inside selectProjectById directly
 
 // Handle resize - switch between mobile and desktop
 window.addEventListener('resize', () => {
