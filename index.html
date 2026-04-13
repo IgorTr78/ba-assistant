@@ -305,6 +305,8 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); color: var(-
 .fchip-pdf { background: var(--coral-light); color: var(--coral); border-color: #FFCCC7; }
 .fchip-docx { background: var(--blue-light); color: var(--blue); border-color: var(--blue-mid); }
 .fchip-bpmn { background: var(--purple-light); color: var(--purple); border-color: #D3ADF7; }
+.fchip-csv  { background: #F6FFED; color: #389E0D; border-color: #B7EB8F; }
+.fchip-xlsx { background: #F0FFF4; color: #087F23; border-color: #52C41A; }
 .fchip-xml { background: var(--amber-light); color: var(--amber); border-color: #FFD591; }
 .fchip-img { background: var(--green-light); color: var(--green); border-color: #B7EB8F; padding: 0; border-radius: 10px; overflow: hidden; cursor: default; }
 .fchip-img .img-thumb { width: 48px; height: 36px; object-fit: cover; display: block; border-radius: 8px 0 0 8px; }
@@ -777,7 +779,7 @@ html, body { height: 100%; overflow: hidden; background: var(--bg); color: var(-
           <textarea class="chat-ta" id="chat-ta" placeholder="Опишите задачу или загрузите документ…" rows="1" onkeydown="handleKey(event)" oninput="grow(this)"></textarea>
           <div class="ibtns">
             <label class="ibtn" title="Прикрепить документ (PDF, DOCX, BPMN)" style="cursor:pointer">
-              <input type="file" id="file-in" multiple accept=".pdf,.docx,.bpmn,.xml" style="display:none" onchange="addFiles(this.files)"/>
+              <input type="file" id="file-in" multiple accept=".pdf,.docx,.bpmn,.xml,.csv,.xlsx,.xls" style="display:none" onchange="addFiles(this.files)"/>
               <svg fill="none" viewBox="0 0 16 16"><path d="M14 8.5V11a5 5 0 0 1-10 0V4a3 3 0 0 1 6 0v7a1 1 0 0 1-2 0V5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
             </label>
             <label class="ibtn" title="Загрузить фото или скриншот (PNG, JPG)" style="cursor:pointer;color:var(--green);border-color:#B7EB8F;background:var(--green-light)">
@@ -1356,7 +1358,8 @@ function renderChips() {
 
   const docChips = files.map((f, i) => {
     const ext = f.name.split('.').pop().toLowerCase();
-    return `<div class="fchip fchip-${ext}">${ext.toUpperCase()} · ${f.name.length>20?f.name.slice(0,18)+'…':f.name}<span class="fchip-rm" onclick="removeFile(${i})">×</span></div>`;
+    const chipColor = {pdf:'pdf',docx:'docx',bpmn:'bpmn',xml:'bpmn',csv:'csv',xlsx:'xlsx',xls:'xlsx'}[ext] || ext;
+    return `<div class="fchip fchip-${chipColor}">${ext.toUpperCase()} · ${f.name.length>20?f.name.slice(0,18)+'…':f.name}<span class="fchip-rm" onclick="removeFile(${i})">×</span></div>`;
   }).join('');
 
   const imgChips = images.map((img, i) => `
