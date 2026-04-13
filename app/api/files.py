@@ -1,6 +1,6 @@
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from typing import Optional
-import uuid
+import os
 
 from app.services.file_processor import extract_text, get_file_type, truncate_text
 from app.services import storage_service
@@ -8,18 +8,11 @@ from app.core.config import settings
 
 router = APIRouter()
 
-ALLOWED_TYPES = {
-    "application/pdf",
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    "application/xml",
-    "text/xml",
-    "image/png",
-    "image/jpeg",
-    "image/jpg",
-    "image/webp",
+ALLOWED_EXTENSIONS = {
+    '.pdf', '.docx', '.bpmn', '.xml',
+    '.csv', '.xlsx', '.xls',
+    '.png', '.jpg', '.jpeg', '.webp',
 }
-
-ALLOWED_EXTENSIONS = {'.pdf', '.docx', '.bpmn', '.xml', '.png', '.jpg', '.jpeg', '.webp'}
 
 
 @router.post("/upload")
@@ -28,17 +21,12 @@ async def upload_file(
     project_id: str = Form(...),
     session_id: Optional[str] = Form(None),
 ):
-    """
-    Загружает файл (документ или изображение) в Supabase Storage.
-    Для документов сразу извлекает текст.
-    """
     # Проверка расширения
-    import os
     ext = os.path.splitext(file.filename or "")[1].lower()
     if ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(
             status_code=400,
-            detail=f"Неподдерживаемый тип файла. Разрешены: {', '.join(ALLOWED_EXTENSIONS)}"
+            detail=f"Неподдерживаемый тип файла. Разрешены: {', '.join(sorted(ALLOWED_EXTENSIONS))}"
         )
 
     content = await file.read()
@@ -52,7 +40,7 @@ async def upload_file(
             detail=f"Файл слишком большой. Максимум: {max_mb} МБ"
         )
 
-    # Извлекаем текст (для изображений — пустая строка, анализ через Vision)
+    # Извлекаем текст
     extracted_text = ""
     if file_type != "image":
         raw_text = extract_text(content, file.filename, file.content_type or "")
@@ -91,17 +79,14 @@ async def upload_file(
 
 @router.get("/{file_id}")
 async def get_file_info(file_id: str):
-    """Возвращает метаданные файла."""
     record = storage_service.get_file_record(file_id)
     if not record:
         raise HTTPException(status_code=404, detail="Файл не найден")
-    # Не возвращаем extracted_text — он может быть большим
     return {k: v for k, v in record.items() if k != "extracted_text"}
 
 
 @router.delete("/{file_id}")
 async def delete_file(file_id: str):
-    """Удаляет файл из Storage и БД."""
     record = storage_service.get_file_record(file_id)
     if not record:
         raise HTTPException(status_code=404, detail="Файл не найден")
